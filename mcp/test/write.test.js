@@ -1,0 +1,126 @@
+// Phase 2 write tools: the pure changes, the session token, and the read-change-write loop
+// against a fake server (200, 409 then 200, refusal).
+import { describe, test, expect, vi, beforeAll } from 'vitest'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+let W
+const SECRET = 'test-secret'
+beforeAll(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'og-write-'))
+  fs.writeFileSync(path.join(dir, 'secret'), SECRET)
+  fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify({ users: [{ id: 'u1', name: 'T', sv: 2 }] }))
+  fs.writeFileSync(path.join(dir, 'state-u1.json'), '{}')
+  process.env.OPENGYM_DATA = dir
+  process.env.OPENGYM_URL = 'http://og.test/'
+  W = await import('../src/write.js')
+})
+
+const state = () => ({
+  unit: 'kg', week: { 1: ['r1'] }, bodyweight: [{ d: '2026-10-20', w: 83, t: 1 }],
+  customEx: [{ id: 'cx', n: 'mi press' }],
+  routines: [{ id: 'r1', name: 'Pierna', ex: [
+    { id: '3650', sets: 3, mode: 'reps', reps: 5, prog: 'off' },
+    { id: 'cx', sets: 4, mode: 'reps', reps: 5, prog: 'linear', inc: 2.5 },
+    { id: 'cx', sets: 3, mode: 'reps', reps: 8, prog: 'off' }
+  ] }, { id: 'r2', name: 'Torso', ex: [{ id: 'cx', sets: 3, mode: 'reps', reps: 8 }] }]
+})
+
+describe('mintToken', () => {
+  test('signs <uid>:<exp>:<sv>:c the way api/server.js verifies it', () => {
+    const tok = W.mintToken({ uid: 'u1', secret: SECRET, sv: 2, now: 1000, ttl: 500 })
+    const i = tok.lastIndexOf('.')
+    expect(tok.slice(0, i)).toBe('u1:1500:2:c')
+    expect(tok.slice(i + 1)).toBe(crypto.createHmac('sha256', SECRET).update('u1:1500:2:c').digest('base64url'))
+  })
+})
+
+describe('editRoutine', () => {
+  test('updates by position, sets rest and clears with null', () => {
+    const S = state()
+    const out = W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 2, set: { weight: 115, rest_sec: 180 } }] })
+    expect(S.routines[0].ex[1]).toMatchObject({ weight: 115, restSec: 180, prog: 'linear' })
+    expect(out.changes[0].before.weight).toBeUndefined()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 2, set: { rest_sec: null } }] })
+    expect(S.routines[0].ex[1].restSec).toBeUndefined()
+  })
+  test('an id that appears twice needs a position', () => {
+    expect(() => W.editRoutine(state(), { routine_id: 'r1', ops: [{ op: 'update', exercise_id: 'cx', set: { sets: 2 } }] })).toThrow(/appears 2 times/)
+  })
+  test('add, replace, move, remove', () => {
+    const S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [
+      { op: 'replace', exercise_id: '3650', new_exercise_id: '2138', set: { sets: 6, mode: 'time', sec: 10, rest_sec: 90 } },
+      { op: 'add', exercise_id: 'cx', position: 1, set: { sets: 3, reps: 10, reps_min: 8, progression: 'double' } },
+      { op: 'move', position: 1, to_position: 4 },
+      { op: 'remove', position: 3 }
+    ] })
+    expect(S.routines[0].ex.map(e => e.id)).toEqual(['2138', 'cx', 'cx'])
+    expect(S.routines[0].ex[0]).toMatchObject({ mode: 'time', sec: 10, restSec: 90, prog: 'off' })
+    expect(S.routines[0].ex[2]).toMatchObject({ reps: 10, repsMin: 8, prog: 'double' })
+  })
+  test('refuses bad input', () => {
+    const f = ops => () => W.editRoutine(state(), { routine_id: 'r1', ops })
+    expect(f([{ op: 'add', exercise_id: 'nope', set: { sets: 3, reps: 5 } }])).toThrow(/unknown exercise/)
+    expect(f([{ op: 'update', position: 1, set: { progression: 'double', mode: 'time' } }])).toThrow(/progression/)
+    expect(f([{ op: 'update', position: 2, set: { reps_min: 9 } }])).toThrow(/above reps/)
+    expect(f([{ op: 'update', position: 9, set: { sets: 1 } }])).toThrow(/outside/)
+    expect(() => W.editRoutine(state(), { routine_id: 'zz' })).toThrow(/no routine/)
+  })
+})
+
+describe('assignWeekday / addBodyweight', () => {
+  test('weekday set and cleared', () => {
+    const S = state()
+    expect(W.assignWeekday(S, { weekday: 4, routine_ids: ['r2'] }).after).toEqual(['Torso'])
+    expect(S.week[4]).toEqual(['r2'])
+    W.assignWeekday(S, { weekday: 1, routine_ids: [] })
+    expect(S.week[1]).toBeUndefined()
+    expect(() => W.assignWeekday(S, { weekday: 2, routine_ids: ['x'] })).toThrow(/no routine/)
+  })
+  test('weigh-in replaces the same day', () => {
+    const S = state()
+    W.addBodyweight(S, { weight: 82.04, date: '2026-10-20', now: 5 })
+    W.addBodyweight(S, { weight: 81.5, date: '2026-10-25', now: 6 })
+    expect(S.bodyweight).toEqual([{ d: '2026-10-20', w: 82, t: 5 }, { d: '2026-10-25', w: 81.5, t: 6 }])
+  })
+})
+
+describe('commit', () => {
+  const reply = (status, data) => Promise.resolve({ status, json: () => Promise.resolve(data) })
+  const change = S => { S.week[3] = ['r1']; return { ok: 1 } }
+
+  test('preview never PUTs', async () => {
+    const fetchImpl = vi.fn(() => reply(200, { state: state(), rev: 4 }))
+    const out = await W.commit(change, { fetchImpl })
+    expect(out).toMatchObject({ applied: false, ok: 1 })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  test('PUTs with baseRev and a bearer, and re-applies after a 409', async () => {
+    const fresh = state(); fresh.week[6] = ['r2']
+    const calls = []
+    const fetchImpl = vi.fn((url, init) => {
+      calls.push([url, init])
+      if (init.method === 'GET') return reply(200, { state: state(), rev: 4 })
+      if (calls.length === 2) return reply(409, { error: 'conflict', state: fresh, rev: 5 })
+      return reply(200, { ok: true, rev: 6 })
+    })
+    const out = await W.commit(change, { apply: true, fetchImpl })
+    expect(out).toMatchObject({ applied: true, rev: 6 })
+    expect(calls[0][0]).toBe('http://og.test/api/data')
+    expect(calls[0][1].headers.authorization).toMatch(/^Bearer u1:\d+:2:c\./)
+    const last = JSON.parse(calls[2][1].body)
+    expect(last.baseRev).toBe(5)
+    expect(last.state.week).toMatchObject({ 3: ['r1'], 6: ['r2'] })   // the other device's day survives
+  })
+  test('a refused write is an error, not a success', async () => {
+    const fetchImpl = vi.fn((u, init) => init.method === 'GET' ? reply(200, { state: state(), rev: 1 }) : reply(400, { error: 'invalid state' }))
+    await expect(W.commit(change, { apply: true, fetchImpl })).rejects.toThrow(/400: invalid state/)
+  })
+  test('no server is a clear error', async () => {
+    const fetchImpl = vi.fn(() => Promise.reject(Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } })))
+    await expect(W.commit(change, { fetchImpl })).rejects.toThrow(/not reachable.*ECONNREFUSED/)
+  })
+})

@@ -18,6 +18,7 @@ import {
 import { loadOfWorkouts, rankOf, levelsOf } from '../../frontend/src/lib/muscles.js'
 import { policyFor } from '../../frontend/src/lib/progression.js'
 import { buildSessionEntries, startsFromLast } from '../../frontend/src/lib/session-start.js'
+import { WRITE_TOOLS } from './write.js'
 
 /* ---------- helpers ---------- */
 
@@ -673,7 +674,9 @@ export const previewSession = {
 /* ---------- registration list ---------- */
 
 export const TOOLS = [
-  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, estimate1rm, muscleBalance
+  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, estimate1rm, muscleBalance,
+  // Phase 2 write tools (write.js): preview by default, write through the running server.
+  ...WRITE_TOOLS
 ]
 
 function noState() {

@@ -128,6 +128,49 @@ missing routine, zero-workout history, no synced state, superset links, three 1R
 tools see consistent values regardless of when the suite runs. The pure lib functions have
 their own 92 tests in `frontend/src/lib/*.test.js`.
 
+## Write tools (fork: `mcp-escritura`)
+
+Three tools that change the profile, named after the Phase 2 plan below so a later upstream
+version can replace them cleanly:
+
+| Tool | What it changes |
+|---|---|
+| `edit_routine` | update an exercise's sets / reps / rep range / weight / rest / progression / increment; add, replace, remove or move exercises; rename the routine |
+| `assign_weekday` | the routine(s) a weekday trains (empty list = rest day) |
+| `add_bodyweight` | a weigh-in for a date (replaces that day's entry) |
+
+- **Preview first.** Every call only previews (before → after) unless it passes `apply: true`.
+- **Through the server, never the file.** A write is `GET /api/data` → change → `PUT /api/data`
+  with `baseRev`, like any device. The server stamps what changed (`api/sync-stamps.js`), so
+  another device's edit is merged rather than overwritten; on a `409` the change is re-applied
+  to the fresh document (3 tries). The server must be running.
+- **Auth without a token file.** The tool signs a 5-minute session for the profile with the
+  instance secret in `OPENGYM_DATA/secret` (the folder this server already reads). Nothing is
+  stored. Anyone who can read that folder can already read and write the state files.
+- `OPENGYM_URL` (default `http://localhost:8080`) is where the running instance answers;
+  `OPENGYM_READONLY=1` registers only the read tools.
+
+Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "opengym": {
+      "command": "node",
+      "args": ["C:\\path\\to\\openGym\\mcp\\src\\index.js"],
+      "env": {
+        "OPENGYM_DATA": "C:\\path\\to\\openGym\\data",
+        "OPENGYM_URL": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+Known limit: a routine that has never been logged opens with the last weight from history, not
+its target, when that history carries no plan (e.g. imported from Hevy) — see
+`frontend/src/lib/progression.js`. It only affects the first session.
+
 ## Roadmap
 
 - **Done (Phase 1):** read-only stdio, 8 tools, direct `./data` access.

@@ -32,7 +32,8 @@ for (const t of TOOLS) {
     t.schema,
     async (params) => {
       try {
-        const result = t.handler(params || {})
+        // await: the write tools are async (they talk to the running server); the readers are not.
+        const result = await t.handler(params || {})
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       } catch (err) {
         const code = err.code || 'ERROR'
