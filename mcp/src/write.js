@@ -15,7 +15,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
 import { dataDir, getUser } from './state.js'
-import { exOr, EXIDX } from '../../frontend/src/lib/exercises.js'
+import { exOr, EXIDX, BODYPARTS } from '../../frontend/src/lib/exercises.js'
+import { MUSCLES, exerciseMuscleSnapshot } from '../../frontend/src/lib/muscles.js'
 import { POLICIES_FOR } from '../../frontend/src/lib/progression.js'
 
 export const apiBase = () => (process.env.OPENGYM_URL || 'http://localhost:8080').replace(/\/+$/, '')
@@ -217,6 +218,37 @@ export function editRoutine(S, { routine_id, rename, ops = [] }) {
   return { routine: { id: r.id, name: r.name }, changes, exercises_after: r.ex.map((e, i) => ({ position: i + 1, ...view(e, S) })) }
 }
 
+/* Custom exercises (the profile's own, e.g. imported from Hevy): body part `bp`, primary muscle
+   `tg` and secondary muscles `sm` — the fields lib/muscles.js reads before falling back to the
+   body part. Workouts logged since the app began snapshotting muscles (`muscleSnapshot` on an
+   entry) keep the snapshot taken at the time; `refresh_history` re-takes it for the edited
+   exercises so past sessions are drawn with the corrected muscles too. */
+export function editCustomExercises(S, { exercises = [], refresh_history = true }) {
+  if (!exercises.length) throw codeErr('EINVAL', 'exercises: give at least one')
+  const muscle = (m, k) => { if (!MUSCLES.includes(m)) throw codeErr('EINVAL', `${k}: unknown muscle "${m}" — one of ${MUSCLES.join(', ')}`); return m }
+  const byId = new Map((S.customEx || []).map(c => [c.id, c]))
+  const changes = [], edited = new Map()
+  for (const x of exercises) {
+    const c = byId.get(x.exercise_id)
+    if (!c) throw codeErr('EINVAL', `${x.exercise_id} is not one of the profile's custom exercises (built-in catalogue exercises already carry their muscles)`)
+    const before = { name: c.n, body_part: c.bp, primary: c.tg || null, secondary: Array.isArray(c.sm) ? c.sm : (c.sm ? [c.sm] : []) }
+    if (x.name != null) { const n = String(x.name).trim(); if (!n) throw codeErr('EINVAL', 'name: empty'); c.n = n }
+    if (x.body_part != null) { if (!BODYPARTS.includes(x.body_part)) throw codeErr('EINVAL', `body_part: one of ${BODYPARTS.join(', ')}`); c.bp = x.body_part }
+    if (x.primary != null) c.tg = muscle(x.primary, 'primary')
+    if (x.secondary != null) c.sm = [...new Set(x.secondary.map(m => muscle(m, 'secondary')))].filter(m => m !== c.tg)
+    edited.set(c.id, c)
+    changes.push({ exercise_id: c.id, before, after: { name: c.n, body_part: c.bp, primary: c.tg || null, secondary: c.sm || [] } })
+  }
+  let refreshed = 0
+  if (refresh_history) {
+    for (const w of S.workouts || []) for (const e of w.entries || []) {
+      const c = edited.get(e.id)
+      if (c && e.muscleSnapshot) { e.muscleSnapshot = exerciseMuscleSnapshot(c); refreshed++ }
+    }
+  }
+  return { changes, history_entries_refreshed: refreshed }
+}
+
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 export function assignWeekday(S, { weekday, routine_ids }) {
   for (const id of routine_ids) if (!(S.routines || []).some(r => r.id === id)) throw codeErr('EINVAL', `no routine with id ${id}`)
@@ -290,4 +322,21 @@ export const addBodyweightTool = {
   handler: ({ apply, weight, date }) => commit(S => addBodyweight(S, { weight, date: date || localIso(new Date()) }), { apply })
 }
 
-export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, assignWeekdayTool, addBodyweightTool]
+export const editCustomExercisesTool = {
+  name: 'edit_custom_exercises',
+  description: 'Fix the body part and muscles of the profile\'s own custom exercises (e.g. imported from Hevy, which arrive with no muscles and a wrong body part, so the app draws a bench day as legs). Sets body_part, primary muscle and secondary muscles (and optionally the name) for one or many exercises in one write; with refresh_history (default true) it also re-takes the muscle snapshot of past sessions of those exercises. Previews by default; apply: true writes through the running server.',
+  schema: {
+    exercises: z.array(z.object({
+      exercise_id: z.string(),
+      name: z.string().optional(),
+      body_part: z.string().optional().describe(`one of ${BODYPARTS.join(', ')}`),
+      primary: z.string().optional().describe(`main muscle: one of ${MUSCLES.join(', ')}`),
+      secondary: z.array(z.string()).optional().describe('supporting muscles, same names')
+    })),
+    refresh_history: z.boolean().optional(),
+    apply: APPLY
+  },
+  handler: ({ apply, ...args }) => commit(S => editCustomExercises(S, args), { apply })
+}
+
+export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, assignWeekdayTool, addBodyweightTool, editCustomExercisesTool]

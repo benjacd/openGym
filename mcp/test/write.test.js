@@ -107,6 +107,24 @@ describe('supersets', () => {
   })
 })
 
+describe('editCustomExercises', () => {
+  test('sets body part and muscles, and re-takes the snapshot of logged sessions', () => {
+    const S = state()
+    S.workouts = [{ d: '2026-10-27', entries: [{ id: 'cx', sets: [], muscleSnapshot: { n: 'mi press', bp: 'upper legs', muscleWeights: { quadriceps: 0.4 } } }, { id: 'zz', sets: [], muscleSnapshot: { bp: 'chest' } }] }]
+    const out = W.editCustomExercises(S, { exercises: [{ exercise_id: 'cx', body_part: 'chest', primary: 'chest', secondary: ['triceps', 'deltoids', 'chest'] }] })
+    expect(S.customEx[0]).toMatchObject({ bp: 'chest', tg: 'chest', sm: ['triceps', 'deltoids'] })
+    expect(out.history_entries_refreshed).toBe(1)
+    expect(S.workouts[0].entries[0].muscleSnapshot.muscleWeights.chest).toBe(1)
+    expect(S.workouts[0].entries[0].muscleSnapshot.muscleWeights.quadriceps).toBeUndefined()
+    expect(S.workouts[0].entries[1].muscleSnapshot).toEqual({ bp: 'chest' })
+  })
+  test('refuses unknown muscles, body parts and catalogue exercises', () => {
+    expect(() => W.editCustomExercises(state(), { exercises: [{ exercise_id: 'cx', primary: 'pecs' }] })).toThrow(/unknown muscle/)
+    expect(() => W.editCustomExercises(state(), { exercises: [{ exercise_id: 'cx', body_part: 'legs' }] })).toThrow(/body_part/)
+    expect(() => W.editCustomExercises(state(), { exercises: [{ exercise_id: '3650', primary: 'chest' }] })).toThrow(/not one of the profile/)
+  })
+})
+
 describe('assignWeekday / addBodyweight', () => {
   test('weekday set and cleared', () => {
     const S = state()

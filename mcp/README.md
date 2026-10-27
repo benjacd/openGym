@@ -138,6 +138,7 @@ version can replace them cleanly:
 | `edit_routine` | update an exercise's sets / reps / rep range / weight / rest / progression / increment; add, replace, remove or move exercises; link neighbouring exercises into a superset (`op: superset`, `positions`, `rest_sec` between rounds) or unlink one (`op: unsuperset`); rename the routine |
 | `assign_weekday` | the routine(s) a weekday trains (empty list = rest day) |
 | `add_bodyweight` | a weigh-in for a date (replaces that day's entry) |
+| `edit_custom_exercises` | body part, primary and secondary muscles (and name) of the profile's own custom exercises — imported ones arrive without muscles — and the muscle snapshot of their past sessions |
 
 - **Preview first.** Every call only previews (before → after) unless it passes `apply: true`.
 - **Through the server, never the file.** A write is `GET /api/data` → change → `PUT /api/data`
