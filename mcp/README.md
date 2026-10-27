@@ -135,7 +135,7 @@ version can replace them cleanly:
 
 | Tool | What it changes |
 |---|---|
-| `edit_routine` | update an exercise's sets / reps / rep range / weight / rest / progression / increment; add, replace, remove or move exercises; rename the routine |
+| `edit_routine` | update an exercise's sets / reps / rep range / weight / rest / progression / increment; add, replace, remove or move exercises; link neighbouring exercises into a superset (`op: superset`, `positions`, `rest_sec` between rounds) or unlink one (`op: unsuperset`); rename the routine |
 | `assign_weekday` | the routine(s) a weekday trains (empty list = rest day) |
 | `add_bodyweight` | a weigh-in for a date (replaces that day's entry) |
 

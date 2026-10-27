@@ -127,7 +127,40 @@ function indexOf(r, { position, exercise_id }, S) {
   return hits[0]
 }
 
-const view = (e, S) => e && ({ exercise: nameOf(e.id, S), id: e.id, sets: e.sets, mode: modeOfEntry(e), reps: e.reps, reps_min: e.repsMin, sec: e.sec, weight: e.weight, rest_sec: e.restSec, progression: e.prog, increment: e.inc })
+const view = (e, S) => e && ({ exercise: nameOf(e.id, S), id: e.id, sets: e.sets, mode: modeOfEntry(e), reps: e.reps, reps_min: e.repsMin, sec: e.sec, weight: e.weight, rest_sec: e.restSec, progression: e.prog, increment: e.inc, ...(e.sg ? { superset: e.sg, superset_rest_sec: e.sgRest, superset_name: e.sgName } : {}) })
+
+/* Supersets, in the app's own shape (frontend/src/views/RoutineEdit.jsx, lib/superset-meta.js):
+   neighbouring exercises share `sg` ('sg' + id), and every member carries the group's `sgName`
+   and `sgRest` (rest between rounds). A group is one contiguous run of 2+ exercises. */
+const newSg = () => 'sg' + crypto.randomBytes(6).toString('hex')
+function dropSg(e) { delete e.sg; delete e.sgName; delete e.sgRest }
+// After any edit: a group split by a move keeps only its first contiguous run, and a group left
+// with a single member is no superset at all.
+export function cleanupSupersets(ex) {
+  const seen = new Set()
+  for (let i = 0; i < ex.length; i++) {
+    const g = ex[i].sg
+    if (!g) continue
+    if (seen.has(g)) { dropSg(ex[i]); continue }
+    let j = i
+    while (j + 1 < ex.length && ex[j + 1].sg === g) j++
+    if (j === i) dropSg(ex[i])
+    seen.add(g); i = j
+  }
+  return ex
+}
+function linkSuperset(r, positions, { rest_sec, name }) {
+  const idx = [...new Set(positions || [])].sort((a, b) => a - b)
+  if (idx.length < 2) throw codeErr('EINVAL', 'superset: give at least two positions')
+  for (const p of idx) if (!(Number.isInteger(p) && p >= 1 && p <= r.ex.length)) throw codeErr('EINVAL', `superset: position ${p} is outside 1–${r.ex.length}`)
+  for (let k = 1; k < idx.length; k++) if (idx[k] !== idx[k - 1] + 1) throw codeErr('EINVAL', 'superset: the exercises must be next to each other — move them first')
+  if (rest_sec != null && !(Number.isInteger(rest_sec) && rest_sec >= 0 && rest_sec <= 900)) throw codeErr('EINVAL', 'superset rest_sec: whole number 0–900')
+  const members = idx.map(p => r.ex[p - 1])
+  // Leaving an old group: what remains of it is cleaned up afterwards.
+  const sg = newSg(), label = name != null ? String(name).trim().slice(0, 40) : ''
+  for (const e of members) { dropSg(e); e.sg = sg; if (label) e.sgName = label; if (rest_sec > 0) e.sgRest = rest_sec }
+  return sg
+}
 
 export function editRoutine(S, { routine_id, rename, ops = [] }) {
   const r = (S.routines || []).find(x => x.id === routine_id)
@@ -157,6 +190,7 @@ export function editRoutine(S, { routine_id, rename, ops = [] }) {
         r.ex.splice(at, 0, e); changes.push({ op, position: at + 1, before: null, after: view(e, S) })
       } else {
         const i = indexOf(r, op, S); const before = view(r.ex[i], S)
+        for (const k of ['sg', 'sgName', 'sgRest']) if (r.ex[i][k] != null) e[k] = r.ex[i][k]   // stays in its superset, as in the app
         r.ex[i] = e; changes.push({ op, position: i + 1, before, after: view(e, S) })
       }
     } else if (op.op === 'remove') {
@@ -167,7 +201,17 @@ export function editRoutine(S, { routine_id, rename, ops = [] }) {
       if (!(Number.isInteger(to) && to >= 1 && to <= r.ex.length)) throw codeErr('EINVAL', `to_position ${to} is outside 1–${r.ex.length}`)
       const [e] = r.ex.splice(i, 1); r.ex.splice(to - 1, 0, e)
       changes.push({ op, from: i + 1, to, exercise: nameOf(e.id, S) })
+    } else if (op.op === 'superset') {
+      const sg = linkSuperset(r, op.positions, op)
+      changes.push({ op, superset: sg, exercises: r.ex.filter(e => e.sg === sg).map(e => nameOf(e.id, S)) })
+    } else if (op.op === 'unsuperset') {
+      const i = indexOf(r, op, S); const g = r.ex[i].sg
+      if (!g) throw codeErr('EINVAL', `${nameOf(r.ex[i].id, S)} is not in a superset`)
+      const names = r.ex.filter(e => e.sg === g).map(e => nameOf(e.id, S))
+      for (const e of r.ex) if (e.sg === g) dropSg(e)
+      changes.push({ op, unlinked: names })
     } else throw codeErr('EINVAL', `unknown op ${op.op}`)
+    cleanupSupersets(r.ex)
   }
   if (!r.ex.length) throw codeErr('EINVAL', 'a routine needs at least one exercise')
   return { routine: { id: r.id, name: r.name }, changes, exercises_after: r.ex.map((e, i) => ({ position: i + 1, ...view(e, S) })) }
@@ -212,16 +256,19 @@ const FIELDS = z.object({
 
 export const editRoutineTool = {
   name: 'edit_routine',
-  description: 'Change a routine: update an exercise\'s sets/reps/weight/rest/progression, add, replace, remove or move exercises, or rename it. Writes go through the running openGym server (merged with other devices, never overwriting them). Previews by default — pass apply: true only after the user agreed. Address an exercise by exercise_id, or by 1-based position when it appears twice (e.g. squat in two places). Note: when the routine has never been logged, the app opens with the last weight from history rather than this target (imported history carries no plan).',
+  description: 'Change a routine: update an exercise\'s sets/reps/weight/rest/progression, add, replace, remove or move exercises, link neighbouring exercises into a superset (op superset, with the rest between rounds) or unlink one (op unsuperset), or rename it. Writes go through the running openGym server (merged with other devices, never overwriting them). Previews by default — pass apply: true only after the user agreed. Address an exercise by exercise_id, or by 1-based position when it appears twice (e.g. squat in two places). Note: when the routine has never been logged, the app opens with the last weight from history rather than this target (imported history carries no plan).',
   schema: {
     routine_id: z.string().describe('from list_routines'),
     rename: z.string().optional(),
     ops: z.array(z.object({
-      op: z.enum(['update', 'add', 'replace', 'remove', 'move']),
+      op: z.enum(['update', 'add', 'replace', 'remove', 'move', 'superset', 'unsuperset']),
       exercise_id: z.string().optional().describe('update/remove/move/replace: the exercise to address; add: the exercise to add'),
       position: z.number().int().optional().describe('1-based; for add, where to insert (default: last)'),
       new_exercise_id: z.string().optional().describe('replace: the exercise that takes its place'),
       to_position: z.number().int().optional().describe('move: 1-based target'),
+      positions: z.array(z.number().int()).optional().describe('superset: the 1-based positions to link — 2 or more, next to each other (move them first if needed)'),
+      rest_sec: z.number().int().optional().describe('superset: rest after each round, seconds'),
+      name: z.string().optional().describe('superset: optional group name'),
       set: FIELDS.optional()
     })).optional(),
     apply: APPLY

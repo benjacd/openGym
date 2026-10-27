@@ -71,6 +71,42 @@ describe('editRoutine', () => {
   })
 })
 
+describe('supersets', () => {
+  test('links neighbours in the app\'s shape, with the round rest on every member', () => {
+    const S = state()
+    const out = W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'superset', positions: [2, 3], rest_sec: 90, name: 'brazos' }] })
+    const [, a, b] = S.routines[0].ex
+    expect(a.sg).toMatch(/^sg[0-9a-f]+$/)
+    expect(b.sg).toBe(a.sg)
+    expect(a).toMatchObject({ sgRest: 90, sgName: 'brazos' })
+    expect(b).toMatchObject({ sgRest: 90, sgName: 'brazos' })
+    expect(S.routines[0].ex[0].sg).toBeUndefined()
+    expect(out.exercises_after[1].superset).toBe(a.sg)
+  })
+  test('refuses exercises that are not next to each other, or fewer than two', () => {
+    expect(() => W.editRoutine(state(), { routine_id: 'r1', ops: [{ op: 'superset', positions: [1, 3] }] })).toThrow(/next to each other/)
+    expect(() => W.editRoutine(state(), { routine_id: 'r1', ops: [{ op: 'superset', positions: [2] }] })).toThrow(/at least two/)
+  })
+  test('unsuperset, and a member removed or moved away leaves no one-exercise group', () => {
+    let S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'superset', positions: [1, 2] }, { op: 'remove', position: 2 }] })
+    expect(S.routines[0].ex.some(e => e.sg)).toBe(false)
+    S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'superset', positions: [1, 2], rest_sec: 60 }, { op: 'move', position: 1, to_position: 3 }] })
+    expect(S.routines[0].ex.some(e => e.sg || e.sgRest)).toBe(false)
+    S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'superset', positions: [2, 3] }, { op: 'unsuperset', position: 2 }] })
+    expect(S.routines[0].ex.some(e => e.sg)).toBe(false)
+    expect(() => W.editRoutine(state(), { routine_id: 'r1', ops: [{ op: 'unsuperset', position: 1 }] })).toThrow(/not in a superset/)
+  })
+  test('replace keeps the exercise in its superset', () => {
+    const S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'superset', positions: [2, 3], rest_sec: 75 }, { op: 'replace', position: 3, new_exercise_id: '3650', set: { sets: 3, reps: 5 } }] })
+    expect(S.routines[0].ex[2]).toMatchObject({ id: '3650', sgRest: 75 })
+    expect(S.routines[0].ex[2].sg).toBe(S.routines[0].ex[1].sg)
+  })
+})
+
 describe('assignWeekday / addBodyweight', () => {
   test('weekday set and cleared', () => {
     const S = state()
