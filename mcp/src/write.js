@@ -249,6 +249,20 @@ export function editCustomExercises(S, { exercises = [], refresh_history = true 
   return { changes, history_entries_refreshed: refreshed }
 }
 
+/* A new routine, built with the same ops edit_routine takes (add, superset, …). It is not put on
+   the weekly plan: assign_weekday does that, so a routine done at home or on demand stays off it. */
+export function createRoutine(S, { name, emoji, ops = [] }) {
+  const n = String(name || '').trim()
+  if (!n) throw codeErr('EINVAL', 'name: required')
+  if (!ops.some(o => o.op === 'add')) throw codeErr('EINVAL', 'ops: add at least one exercise')
+  S.routines = Array.isArray(S.routines) ? S.routines : []
+  if (S.routines.some(r => r.name.trim().toLowerCase() === n.toLowerCase())) throw codeErr('EINVAL', `a routine called "${n}" already exists — use edit_routine`)
+  const id = 'mc' + crypto.randomBytes(6).toString('hex')
+  S.routines.push({ id, name: n, emoji: emoji || 'figureStrength', prog: 'off', ex: [] })
+  const out = editRoutine(S, { routine_id: id, ops })
+  return { created: true, ...out, note: 'not on the weekly plan — open it from the routine list, or use assign_weekday' }
+}
+
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 export function assignWeekday(S, { weekday, routine_ids }) {
   for (const id of routine_ids) if (!(S.routines || []).some(r => r.id === id)) throw codeErr('EINVAL', `no routine with id ${id}`)
@@ -339,4 +353,16 @@ export const editCustomExercisesTool = {
   handler: ({ apply, ...args }) => commit(S => editCustomExercises(S, args), { apply })
 }
 
-export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, assignWeekdayTool, addBodyweightTool, editCustomExercisesTool]
+export const createRoutineTool = {
+  name: 'create_routine',
+  description: 'Create a new routine from a name and the same ops edit_routine takes (add exercises, then link neighbours with superset). It is NOT put on the weekly plan (use assign_weekday for that), so it suits sessions done at home or on demand. Previews by default; apply: true writes through the running server.',
+  schema: {
+    name: z.string(),
+    emoji: z.string().optional().describe('an app icon name, e.g. figureStrength, legs, barbell, bolt'),
+    ops: editRoutineTool.schema.ops,
+    apply: APPLY
+  },
+  handler: ({ apply, ...args }) => commit(S => createRoutine(S, args), { apply })
+}
+
+export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, createRoutineTool, assignWeekdayTool, addBodyweightTool, editCustomExercisesTool]

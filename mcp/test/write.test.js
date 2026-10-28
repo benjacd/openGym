@@ -125,6 +125,29 @@ describe('editCustomExercises', () => {
   })
 })
 
+describe('createRoutine', () => {
+  test('builds a routine off the weekly plan, supersets included', () => {
+    const S = state()
+    const out = W.createRoutine(S, { name: 'Core en casa', ops: [
+      { op: 'add', exercise_id: '0857', set: { sets: 3, reps: 10 } },
+      { op: 'add', exercise_id: '0715', set: { sets: 3, mode: 'time', sec: 30 } },
+      { op: 'superset', positions: [1, 2], rest_sec: 60 }
+    ] })
+    const r = S.routines.at(-1)
+    expect(r).toMatchObject({ name: 'Core en casa', prog: 'off' })
+    expect(r.id).toMatch(/^mc[0-9a-f]+$/)
+    expect(r.ex.map(e => e.id)).toEqual(['0857', '0715'])
+    expect(r.ex[1].sg).toBe(r.ex[0].sg)
+    expect(Object.values(S.week).flat().includes(r.id)).toBe(false)
+    expect(out.created).toBe(true)
+  })
+  test('needs a name, an exercise, and a name not taken', () => {
+    expect(() => W.createRoutine(state(), { name: ' ', ops: [{ op: 'add', exercise_id: '0857', set: { sets: 1, reps: 1 } }] })).toThrow(/name/)
+    expect(() => W.createRoutine(state(), { name: 'X', ops: [] })).toThrow(/at least one exercise/)
+    expect(() => W.createRoutine(state(), { name: 'pierna', ops: [{ op: 'add', exercise_id: '0857', set: { sets: 1, reps: 1 } }] })).toThrow(/already exists/)
+  })
+})
+
 describe('assignWeekday / addBodyweight', () => {
   test('weekday set and cleared', () => {
     const S = state()
