@@ -148,6 +148,32 @@ describe('createRoutine', () => {
   })
 })
 
+describe('importData', () => {
+  test('adds only what is missing, and repeating it adds nothing', () => {
+    const S = state()
+    S.workouts = [{ id: 'w1', d: '2026-10-27', entries: [] }]
+    const kept = {
+      workouts: [{ id: 'w1', d: '2026-10-27', entries: [] }, { id: 'w3', d: '2026-10-30', start: 2, entries: [{ id: 'cx', sets: [{ w: 30, r: 10, done: true }] }] }, { id: 'w2', d: '2026-10-29', entries: [{ id: 'cx', sets: [{ w: 40, r: 3, done: true }, { w: 40, r: 3, done: false }] }] }],
+      bodyweight: [{ d: '2026-10-20', w: 90, t: 1 }, { d: '2026-10-28', w: 83, t: 2 }],
+      measurements: [{ d: '2026-10-28', waist: 87 }]
+    }
+    const out = W.importData(S, kept)
+    expect(S.workouts.map(w => w.id)).toEqual(['w1', 'w2', 'w3'])
+    expect(out.workouts_added.map(w => w.sets)).toEqual([1, 1])
+    expect(out.workouts_skipped[0].id).toBe('w1')
+    expect(S.bodyweight.find(b => b.d === '2026-10-20').w).toBe(83)
+    expect(out.bodyweight_days_added).toEqual(['2026-10-28'])
+    expect(S.measurements).toEqual([{ d: '2026-10-28', waist: 87 }])
+    const again = W.importData(S, kept)
+    expect(again.workouts_added.length).toBe(0)
+    expect(again.bodyweight_days_added.length + again.measurement_days_added.length).toBe(0)
+  })
+  test('refuses malformed workouts', () => {
+    expect(() => W.importData(state(), { workouts: [{ id: 'x', d: 'ayer', entries: [] }] })).toThrow(/needs id, d/)
+    expect(() => W.importData(state(), { workouts: [{ id: 'x', d: '2026-10-29', entries: [{ sets: [] }] }] })).toThrow(/exercise id/)
+  })
+})
+
 describe('assignWeekday / addBodyweight', () => {
   test('weekday set and cleared', () => {
     const S = state()

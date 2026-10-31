@@ -263,6 +263,42 @@ export function createRoutine(S, { name, emoji, ops = [] }) {
   return { created: true, ...out, note: 'not on the weekly plan — open it from the routine list, or use assign_weekday' }
 }
 
+/* Bring back what a device kept but the server never got (a phone's "kept changes" export, a
+   backup): workouts whose id the profile does not have, and weigh-ins / measurements for days it
+   has none of. Nothing already on the server is touched, so running it twice adds nothing. */
+const ISO = /^\d{4}-\d{2}-\d{2}$/
+export function importData(S, { workouts = [], bodyweight = [], measurements = [] }) {
+  S.workouts = Array.isArray(S.workouts) ? S.workouts : []
+  const have = new Set(S.workouts.map(w => w.id))
+  const added = [], skipped = []
+  for (const w of workouts) {
+    if (!w || typeof w.id !== 'string' || !ISO.test(w.d || '') || !Array.isArray(w.entries)) throw codeErr('EINVAL', `workout ${w?.id ?? '?'}: needs id, d (YYYY-MM-DD) and entries`)
+    for (const e of w.entries) if (!e || typeof e.id !== 'string' || !Array.isArray(e.sets)) throw codeErr('EINVAL', `workout ${w.id}: every entry needs an exercise id and sets`)
+    if (have.has(w.id)) { skipped.push({ id: w.id, date: w.d, why: 'already on the server' }); continue }
+    S.workouts.push(structuredClone(w)); have.add(w.id)
+    added.push({ id: w.id, date: w.d, name: w.name || null, exercises: w.entries.length, sets: w.entries.reduce((n, e) => n + e.sets.filter(x => x.done !== false).length, 0) })
+  }
+  S.workouts.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : (a.start || 0) - (b.start || 0)))
+  const byDay = (list, items, label) => {
+    const days = new Set(list.map(x => x.d)), out = []
+    for (const x of items) {
+      if (!x || !ISO.test(x.d || '')) throw codeErr('EINVAL', `${label}: every item needs d (YYYY-MM-DD)`)
+      if (days.has(x.d)) continue
+      list.push(structuredClone(x)); days.add(x.d); out.push(x.d)
+    }
+    list.sort((a, b) => (a.d < b.d ? -1 : 1))
+    return out
+  }
+  S.bodyweight = Array.isArray(S.bodyweight) ? S.bodyweight : []
+  S.measurements = Array.isArray(S.measurements) ? S.measurements : []
+  for (const b of bodyweight) if (!(typeof b?.w === 'number' && b.w > 0)) throw codeErr('EINVAL', 'bodyweight: every item needs w')
+  return {
+    workouts_added: added, workouts_skipped: skipped,
+    bodyweight_days_added: byDay(S.bodyweight, bodyweight, 'bodyweight'),
+    measurement_days_added: byDay(S.measurements, measurements, 'measurements')
+  }
+}
+
 const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 export function assignWeekday(S, { weekday, routine_ids }) {
   for (const id of routine_ids) if (!(S.routines || []).some(r => r.id === id)) throw codeErr('EINVAL', `no routine with id ${id}`)
@@ -365,4 +401,16 @@ export const createRoutineTool = {
   handler: ({ apply, ...args }) => commit(S => createRoutine(S, args), { apply })
 }
 
-export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, createRoutineTool, assignWeekdayTool, addBodyweightTool, editCustomExercisesTool]
+export const importDataTool = {
+  name: 'import_data',
+  description: 'Bring back workouts, weigh-ins and body measurements a device kept but the server never received (e.g. from a phone\'s "kept changes" export or a backup file): adds workouts whose id the profile does not have yet and weigh-ins / measurements for days with none, in the app\'s own stored shape. Never changes or removes anything already there, so it is safe to repeat. Previews by default; apply: true writes through the running server.',
+  schema: {
+    workouts: z.array(z.object({ id: z.string(), d: z.string(), entries: z.array(z.object({ id: z.string(), sets: z.array(z.any()) }).passthrough()) }).passthrough()).optional(),
+    bodyweight: z.array(z.object({ d: z.string(), w: z.number() }).passthrough()).optional(),
+    measurements: z.array(z.object({ d: z.string() }).passthrough()).optional(),
+    apply: APPLY
+  },
+  handler: ({ apply, ...args }) => commit(S => importData(S, args), { apply })
+}
+
+export const WRITE_TOOLS = /^(1|true|yes|on)$/i.test(process.env.OPENGYM_READONLY || '') ? [] : [editRoutineTool, createRoutineTool, assignWeekdayTool, addBodyweightTool, editCustomExercisesTool, importDataTool]

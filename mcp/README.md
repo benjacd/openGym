@@ -139,6 +139,7 @@ version can replace them cleanly:
 | `create_routine` | a new routine from the same ops (add, superset…), left off the weekly plan |
 | `assign_weekday` | the routine(s) a weekday trains (empty list = rest day) |
 | `add_bodyweight` | a weigh-in for a date (replaces that day's entry) |
+| `import_data` | workouts / weigh-ins / measurements a device kept but the server never got (e.g. a phone's "kept changes" export): adds only missing workout ids and missing days, never touches what is there |
 | `edit_custom_exercises` | body part, primary and secondary muscles (and name) of the profile's own custom exercises — imported ones arrive without muscles — and the muscle snapshot of their past sessions |
 
 - **Preview first.** Every call only previews (before → after) unless it passes `apply: true`.
