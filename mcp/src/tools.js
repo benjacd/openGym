@@ -65,6 +65,9 @@ function entryView(e, S) {
     body_part: ex.bp || null,
     mode,
     target: e.target || null,
+    // The note typed on this exercise during the session (what was swapped, how it felt, …):
+    // often the one thing that explains the numbers.
+    ...(typeof e.note === 'string' && e.note.trim() ? { note: e.note.trim() } : {}),
     sets: (e.sets || []).map(s => ({
       done: !!s.done,
       label: setLabel(e.id, { ...s, done: undefined }, cfg),
@@ -320,7 +323,7 @@ function plannedSets(w) {
 /** get_workout — full entry/set breakdown for one date. */
 export const getWorkout = {
   name: 'get_workout',
-  description: 'Get the full breakdown of one workout: every exercise, its mode (reps/time/cardio), the target, and per-set labels (e.g. "5 @ 60 kg", "1:30 · 20 kg"). Identify it by workout_id (from list_workouts) or by date. Use list_workouts first if you don\'t know either.',
+  description: 'Get the full breakdown of one workout: every exercise, its mode (reps/time/cardio), the target, and per-set labels (e.g. "5 @ 60 kg", "1:30 · 20 kg"), and the notes the user typed on the session or on an exercise (`note`) — read them, they often explain the numbers. Identify it by workout_id (from list_workouts) or by date. Use list_workouts first if you don\'t know either.',
   schema: {
     date: isoDate().optional().describe('The workout date as YYYY-MM-DD. If two sessions share that date, the answer lists them instead and asks for a workout_id.'),
     workout_id: z.string().min(1).optional().describe('The id from list_workouts. Preferred: it names one session even on a day with two.')
@@ -371,6 +374,7 @@ export const getWorkout = {
         const ex = exerciseOf(id, S)
         return ex.missing ? id : ex.n
       }),
+      ...(typeof w.note === 'string' && w.note.trim() ? { note: w.note.trim() } : {}),
       entries: (w.entries || []).map(e => entryView(e, S))
     }
   }
