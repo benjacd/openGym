@@ -26,7 +26,6 @@ import {
 const measurementLabel = (key, custom = []) => key.startsWith('other:')
   ? ((custom || []).find(c => c.id === key.slice(6))?.name || 'Other')
   : (MEASUREMENT_FIELDS.find(f => f.key === key)?.label || key)
-import { WRITE_TOOLS as FORK_WRITE_TOOLS } from './write.js'
 import { programmesOf, programmeStatus, programmeRoutineIds } from '../../frontend/src/lib/programmes.js'
 import { readingsOf, dailyModeOf } from '../../frontend/src/lib/weigh-ins.js'
 import { setVideosOf, setVideoCount } from '../../frontend/src/lib/set-videos.js'
@@ -817,9 +816,7 @@ export const getProgramme = {
 }
 
 export const TOOLS = [
-  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, getMeasurements, estimate1rm, muscleBalance, getProgramme,
-  // Fork write tools (write.js): preview by default, write through the running server.
-  ...FORK_WRITE_TOOLS
+  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, getMeasurements, estimate1rm, muscleBalance, getProgramme
 ]
 
 function noState() {

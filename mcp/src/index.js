@@ -7,6 +7,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { TOOLS } from './tools.js'
 import { WRITE_TOOLS } from './write-tools.js'
+// Fork write tools (write.js, branch mcp-escritura): preview by default, write through the running server.
+import { WRITE_TOOLS as FORK_WRITE_TOOLS } from './write.js'
 import { init, getUser } from './state.js'
 
 const server = new McpServer({
@@ -27,7 +29,7 @@ try {
   // env and restarting.
 }
 
-for (const t of [...TOOLS, ...WRITE_TOOLS]) {
+for (const t of [...TOOLS, ...WRITE_TOOLS, ...FORK_WRITE_TOOLS]) {
   server.tool(
     t.name,
     t.description,
