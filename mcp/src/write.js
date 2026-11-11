@@ -18,6 +18,7 @@ import { dataDir, getUser } from './state.js'
 import { exOr, EXIDX, BODYPARTS } from '../../frontend/src/lib/exercises.js'
 import { MUSCLES, exerciseMuscleSnapshot } from '../../frontend/src/lib/muscles.js'
 import { POLICIES_FOR } from '../../frontend/src/lib/progression.js'
+import { PYRAMID_MAX, MAX_PYRAMID_SETS, normalizePyramid, normalizePyramidRest, normalizePyramidWeight, flatFromPyramid } from '../../frontend/src/lib/pyramid.js'
 
 export const apiBase = () => (process.env.OPENGYM_URL || 'http://localhost:8080').replace(/\/+$/, '')
 const TOKEN_TTL_MS = 5 * 60 * 1000
@@ -104,6 +105,15 @@ function checkFields(f, mode) {
   if (f.increment != null && !(typeof f.increment === 'number' && f.increment > 0 && f.increment <= 50)) bad('increment', 'more than 0, at most 50')
   if (f.mode != null && !['reps', 'time', 'cardio'].includes(f.mode)) bad('mode', 'reps, time or cardio')
   if (f.progression != null && !(POLICIES_FOR[mode] || ['off']).includes(f.progression)) bad('progression', `for ${mode} mode one of ${(POLICIES_FOR[mode] || ['off']).join(', ')}`)
+  const list = (k, ok, why) => {
+    if (f[k] == null) return
+    if (!Array.isArray(f[k]) || !f[k].length || f[k].length > MAX_PYRAMID_SETS) bad(k, `a list of 1–${MAX_PYRAMID_SETS} values, or null to clear it`)
+    if (!f[k].every(ok)) bad(k, why)
+  }
+  list('pyramid', v => v === PYRAMID_MAX || (Number.isInteger(v) && v >= 1 && v <= 100), `whole reps 1–100 or "${PYRAMID_MAX}"`)
+  list('pyramid_weight', v => typeof v === 'number' && v >= 0 && v <= 1000, 'weights 0–1000 (0 = that set starts from last time)')
+  list('pyramid_rest_sec', v => Number.isInteger(v) && v >= 0 && v <= 900, 'whole seconds 0–900 (0 = the exercise\'s rest)')
+  if (f.pyramid != null && mode !== 'reps') bad('pyramid', 'only in reps mode')
 }
 
 function setFields(e, f) {
@@ -112,7 +122,31 @@ function setFields(e, f) {
     if (v === null) delete e[FIELD[k]]
     else e[FIELD[k]] = v
   }
+  setPyramid(e, f)
   if (e.repsMin != null && e.reps != null && e.repsMin > e.reps) throw codeErr('EINVAL', `reps_min (${e.repsMin}) is above reps (${e.reps})`)
+}
+
+/* Pyramid sets in the app's stored shape (frontend/src/lib/pyramid.js): `pyramid` one rep target
+   per set, `pyramidWeight` / `pyramidRest` beside it (0 = no plan for that set). Turning it on
+   keeps `sets`/`reps` in line the way the editor does (flatFromPyramid), turning it off (null)
+   drops all three. A pyramid is never progressed by the app. */
+function setPyramid(e, f) {
+  if (f.pyramid === null) { delete e.pyramid; delete e.pyramidWeight; delete e.pyramidRest }
+  else if (f.pyramid != null) {
+    e.pyramid = normalizePyramid(f.pyramid)
+    const flat = flatFromPyramid(e.pyramid); e.sets = flat.sets; e.reps = flat.reps
+    delete e.repsMin
+  }
+  const has = Array.isArray(e.pyramid) && e.pyramid.length
+  for (const [k, key, norm] of [['pyramid_weight', 'pyramidWeight', normalizePyramidWeight], ['pyramid_rest_sec', 'pyramidRest', normalizePyramidRest]]) {
+    if (f[k] === null) { delete e[key]; continue }
+    if (f[k] != null && !has) throw codeErr('EINVAL', `${k}: the exercise has no pyramid — set pyramid too`)
+    if (f[k] != null && f[k].length !== e.pyramid.length) throw codeErr('EINVAL', `${k}: ${f[k].length} values for ${e.pyramid.length} pyramid sets`)
+    const src = f[k] != null ? f[k] : e[key]
+    if (!has || src == null) continue
+    const out = norm(src, e.pyramid.length)   // a pyramid that changed length keeps the lists sized to it
+    if (out.length) e[key] = out; else delete e[key]
+  }
 }
 
 // Exercise address inside a routine: a 1-based position, or an exercise id that appears once.
@@ -128,7 +162,7 @@ function indexOf(r, { position, exercise_id }, S) {
   return hits[0]
 }
 
-const view = (e, S) => e && ({ exercise: nameOf(e.id, S), id: e.id, sets: e.sets, mode: modeOfEntry(e), reps: e.reps, reps_min: e.repsMin, sec: e.sec, weight: e.weight, rest_sec: e.restSec, progression: e.prog, increment: e.inc, ...(e.sg ? { superset: e.sg, superset_rest_sec: e.sgRest, superset_name: e.sgName } : {}) })
+const view = (e, S) => e && ({ exercise: nameOf(e.id, S), id: e.id, sets: e.sets, mode: modeOfEntry(e), reps: e.reps, reps_min: e.repsMin, sec: e.sec, weight: e.weight, rest_sec: e.restSec, progression: e.prog, increment: e.inc, ...(Array.isArray(e.pyramid) && e.pyramid.length ? { pyramid: e.pyramid, ...(e.pyramidWeight ? { pyramid_weight: e.pyramidWeight } : {}), ...(e.pyramidRest ? { pyramid_rest_sec: e.pyramidRest } : {}) } : {}), ...(e.sg ? { superset: e.sg, superset_rest_sec: e.sgRest, superset_name: e.sgName } : {}) })
 
 /* Supersets, in the app's own shape (frontend/src/views/RoutineEdit.jsx, lib/superset-meta.js):
    neighbouring exercises share `sg` ('sg' + id), and every member carries the group's `sgName`
@@ -333,12 +367,15 @@ const FIELDS = z.object({
   progression: z.string().optional().describe('off | linear | greyskull | double | triple (reps mode); off | time (time mode)'),
   increment: z.number().nullable().optional().describe('load step per progression, profile unit'),
   sec: z.number().int().optional().describe('seconds per set (time mode)'),
-  mode: z.enum(['reps', 'time', 'cardio']).optional()
+  mode: z.enum(['reps', 'time', 'cardio']).optional(),
+  pyramid: z.array(z.union([z.number().int(), z.literal(PYRAMID_MAX)])).nullable().optional().describe(`pyramid sets (reps mode): one rep target per set, in order, "${PYRAMID_MAX}" = as many as possible; sets/reps follow it; null turns the pyramid off. The app never progresses a pyramid`),
+  pyramid_weight: z.array(z.number()).nullable().optional().describe('each pyramid set\'s planned weight, same length as pyramid (e.g. a top set + back-off: [95, 95, 90, 90]); 0 = that set starts from last time; null clears it'),
+  pyramid_rest_sec: z.array(z.number().int()).nullable().optional().describe('each pyramid set\'s rest in seconds, same length as pyramid; 0 = the exercise\'s rest; null clears it')
 }).partial()
 
 export const editRoutineTool = {
   name: 'edit_routine',
-  description: 'Change a routine: update an exercise\'s sets/reps/weight/rest/progression, add, replace, remove or move exercises, link neighbouring exercises into a superset (op superset, with the rest between rounds) or unlink one (op unsuperset), or rename it. Writes go through the running openGym server (merged with other devices, never overwriting them). Previews by default — pass apply: true only after the user agreed. Address an exercise by exercise_id, or by 1-based position when it appears twice (e.g. squat in two places). Note: when the routine has never been logged, the app opens with the last weight from history rather than this target (imported history carries no plan).',
+  description: 'Change a routine: update an exercise\'s sets/reps/weight/rest/progression or its pyramid sets (per-set reps, weight and rest), add, replace, remove or move exercises, link neighbouring exercises into a superset (op superset, with the rest between rounds) or unlink one (op unsuperset), or rename it. Writes go through the running openGym server (merged with other devices, never overwriting them). Previews by default — pass apply: true only after the user agreed. Address an exercise by exercise_id, or by 1-based position when it appears twice (e.g. squat in two places). Note: when the routine has never been logged, the app opens with the last weight from history rather than this target (imported history carries no plan).',
   schema: {
     routine_id: z.string().describe('from list_routines'),
     rename: z.string().optional(),

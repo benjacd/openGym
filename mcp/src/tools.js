@@ -1,4 +1,4 @@
-/* The eight read-only tools. Each handler returns JSON; labels.js pre-substitutes any
+/* The nine read-only tools. Each handler returns JSON; labels.js pre-substitutes any
    {0}/{1} template the lib returns so the LLM gets final text, not template strings.
    ISO dates are validated on the way in; the handlers never see 'yesterday'. */
 import { z } from 'zod'
@@ -18,6 +18,9 @@ import {
 import { loadOfWorkouts, rankOf, levelsOf } from '../../frontend/src/lib/muscles.js'
 import { policyFor } from '../../frontend/src/lib/progression.js'
 import { buildSessionEntries, startsFromLast } from '../../frontend/src/lib/session-start.js'
+import {
+  MEASUREMENT_KEYS, measurementUnit, toMeasurementDisplay, normalizeMeasurementsState, measurementValue, measurementLabel
+} from '../../frontend/src/lib/measurements.js'
 import { WRITE_TOOLS } from './write.js'
 
 /* ---------- helpers ---------- */
@@ -414,6 +417,69 @@ export const getBodyweight = {
   }
 }
 
+/** get_measurements — tape check-ins (cm/in) and body-fat %, with latest value and change per field. */
+export const getMeasurements = {
+  name: 'get_measurements',
+  description: 'Get the body-measurement log: tape check-ins (neck, shoulders, chest, waist, hips, abdomen, upper arms, forearms, wrists, thighs, calves, ankles, optional body-fat % and any custom fields). Returns each check-in with only the fields that were filled in (plus the same-day weigh-in when there is one), the latest value per field, and the change per field from the first to the last reading in the range. Circumferences are in cm for kg profiles and inches for lb profiles; body fat is a percent. Useful for "is my waist going down while my arms grow?" questions.',
+  schema: {
+    from: isoDate().optional().describe('Inclusive start date YYYY-MM-DD.'),
+    to: isoDate().optional().describe('Inclusive end date YYYY-MM-DD. Defaults to today.')
+  },
+  handler: ({ from, to }) => {
+    const S = getState()
+    if (!S) return noState()
+    // Normalize a copy: the same folding the app does (one row per date, junk values dropped),
+    // without mutating the cached state other tools read.
+    const N = normalizeMeasurementsState({
+      measurements: S.measurements, customMeasurements: S.customMeasurements, measurementEnabled: S.measurementEnabled
+    })
+    const custom = N.customMeasurements
+    const keys = [...MEASUREMENT_KEYS, ...custom.map(c => 'other:' + c.id)]
+    const hi = to || todayIso()
+    const rows = N.measurements.filter(e => !(from && e.d < from) && e.d <= hi)
+    const display = (key, raw) => raw == null ? null : (key === 'bodyFat' ? raw : toMeasurementDisplay(raw, S.unit || 'kg'))
+    const weighIn = d => {
+      const same = (S.bodyweight || []).filter(b => b.d === d)
+      return same.length ? same[same.length - 1].w : null
+    }
+    const round1 = n => Math.round(n * 10) / 10
+
+    const fields = {}
+    const latest = {}
+    const first = {}
+    const entries = rows.map(e => {
+      const values = {}
+      for (const key of keys) {
+        const v = display(key, measurementValue(e, key))
+        if (v == null) continue
+        values[key] = v
+        fields[key] = measurementLabel(key, custom)
+        if (!first[key]) first[key] = { date: e.d, value: v }
+        latest[key] = { date: e.d, value: v }
+      }
+      const w = weighIn(e.d)
+      return { date: e.d, ...(w != null ? { weight_same_day: w } : {}), values }
+    }).filter(e => Object.keys(e.values).length)
+
+    const change = {}
+    for (const key of Object.keys(latest)) {
+      const a = first[key], b = latest[key]
+      if (a.date === b.date) continue
+      change[key] = { from: a.value, from_date: a.date, to: b.value, to_date: b.date, delta: round1(b.value - a.value) }
+    }
+
+    return {
+      unit: measurementUnit(S.unit || 'kg'),
+      body_fat_unit: '%',
+      count: entries.length,
+      fields,
+      latest,
+      change,
+      entries
+    }
+  }
+}
+
 /** estimate_1rm — best-ever 1RM for one exercise or a PR table across all reps-mode exercises. */
 export const estimate1rm = {
   name: 'estimate_1rm',
@@ -678,7 +744,7 @@ export const previewSession = {
 /* ---------- registration list ---------- */
 
 export const TOOLS = [
-  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, estimate1rm, muscleBalance,
+  listRoutines, getRoutine, previewSession, getWeekPlan, listWorkouts, getWorkout, getBodyweight, getMeasurements, estimate1rm, muscleBalance,
   // Phase 2 write tools (write.js): preview by default, write through the running server.
   ...WRITE_TOOLS
 ]

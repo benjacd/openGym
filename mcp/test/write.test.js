@@ -227,3 +227,38 @@ describe('commit', () => {
     await expect(W.commit(change, { fetchImpl })).rejects.toThrow(/not reachable.*ECONNREFUSED/)
   })
 })
+
+describe('editRoutine pyramid sets', () => {
+  test('a top set + back-off pyramid with its own weights, sets/reps kept in line', () => {
+    const S = state()
+    const out = W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid: [5, 5, 5, 5], pyramid_weight: [95, 95, 90, 90] } }] })
+    expect(S.routines[0].ex[0]).toMatchObject({ pyramid: [5, 5, 5, 5], pyramidWeight: [95, 95, 90, 90], sets: 4, reps: 5 })
+    expect(out.changes[0].after).toMatchObject({ pyramid: [5, 5, 5, 5], pyramid_weight: [95, 95, 90, 90] })
+  })
+  test('per-set rest, weights-only update, and null turns it all off', () => {
+    const S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid: [5, 5, 'max'], pyramid_rest_sec: [180, 180, 0] } }] })
+    expect(S.routines[0].ex[0]).toMatchObject({ pyramid: [5, 5, 'max'], pyramidRest: [180, 180, 0], sets: 3 })
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid_weight: [100, 95, 90] } }] })
+    expect(S.routines[0].ex[0].pyramidWeight).toEqual([100, 95, 90])
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid: null } }] })
+    const e = S.routines[0].ex[0]
+    expect(e.pyramid).toBeUndefined(); expect(e.pyramidWeight).toBeUndefined(); expect(e.pyramidRest).toBeUndefined()
+  })
+  test('a pyramid that changes length keeps its weights sized to it; add takes a pyramid too', () => {
+    const S = state()
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid: [5, 5, 5, 5], pyramid_weight: [95, 95, 90, 90] } }] })
+    W.editRoutine(S, { routine_id: 'r1', ops: [{ op: 'update', position: 1, set: { pyramid: [5, 5, 5] } }] })
+    expect(S.routines[0].ex[0].pyramidWeight).toEqual([95, 95, 90])
+    W.editRoutine(S, { routine_id: 'r2', ops: [{ op: 'add', exercise_id: 'cx', set: { sets: 1, reps: 5, pyramid: [3, 3], pyramid_weight: [100, 0] } }] })
+    expect(S.routines[1].ex[1]).toMatchObject({ pyramid: [3, 3], pyramidWeight: [100, 0], sets: 2, reps: 3 })
+  })
+  test('refuses bad pyramids', () => {
+    const f = set => () => W.editRoutine(state(), { routine_id: 'r1', ops: [{ op: 'update', position: 1, set }] })
+    expect(f({ pyramid_weight: [90, 90, 90] })).toThrow(/no pyramid/)
+    expect(f({ pyramid: [5, 5], pyramid_weight: [90] })).toThrow(/1 values for 2/)
+    expect(f({ pyramid: [] })).toThrow(/pyramid/)
+    expect(f({ pyramid: [0, 5] })).toThrow(/whole reps/)
+    expect(f({ pyramid: [5], mode: 'time', sec: 30 })).toThrow(/only in reps mode/)
+  })
+})
