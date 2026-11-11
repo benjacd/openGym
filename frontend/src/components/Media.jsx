@@ -4,7 +4,8 @@ import { MOBILE } from '../lib/mobile.js'
 import { useStore } from '../store/useStore.js'
 import { t, exerciseNameFor } from '../lib/i18n.js'
 import Icon from './Icon.jsx'
-import CustomMedia, { CustomThumb } from './CustomMedia.jsx'
+import CustomMedia, { CustomThumb, LinkCard } from './CustomMedia.jsx'
+import { youtubeId, youtubeLinks } from '../lib/youtube.js'
 import { useAnimSources } from './Animations.jsx'
 
 // An exercise's picture, wherever one shows. A custom exercise goes to CustomMedia.jsx — its own
@@ -12,7 +13,13 @@ import { useAnimSources } from './Animations.jsx'
 // name files of the shipped dataset (a stray img/gif on a custom exercise, written by a fork, is
 // ignored). The split is by component, not by branch, so each side keeps its own hooks in order.
 export default function Media(p) {
-  return isCustomEx(p.ex) ? <CustomMedia {...p} /> : <BuiltinMedia {...p} />
+  const size = useStore(s => s.S.gifSize)
+  const custom = isCustomEx(p.ex)
+  const links = youtubeLinks(p.notes).filter(url => !custom || youtubeId(url) !== youtubeId(p.ex?.url))
+  return <>
+    {custom ? <CustomMedia {...p} /> : <BuiltinMedia {...p} />}
+    {(!p.minimizable || size !== 'off') && links.map(url => <LinkCard key={url} url={url} compact={p.compact} mini={p.minimizable && size === 'mini'} />)}
+  </>
 }
 
 // Big autoplaying animation; tap toggles to the still frame. `compact` shrinks it (superset cards).
@@ -64,7 +71,7 @@ function BuiltinMedia({ ex, id, compact, minimizable }) {
         : showGif && clip && clipSrc
           // No poster: Android's WebView went back to it at every loop and stalled there (the
           // still above stands in while the clip loads, so nothing is lost without it).
-          ? <video ref={autoplayMuted} className="catvid" src={clipSrc} autoPlay muted loop playsInline disablePictureInPicture
+          ? <video ref={autoplayClip} className="catvid" src={clipSrc} autoPlay muted loop playsInline disablePictureInPicture
               aria-label={exerciseNameFor(ex)} onError={onError} />
           : showGif && clip
             // the phone app is still reading the clip into memory: the still holds its place
@@ -139,6 +146,27 @@ export function autoplayMuted(el) {
   el.setAttribute('muted', '')
   const p = el.play?.()
   if (p && typeof p.catch === 'function') p.catch(() => {})
+}
+
+// An exercise's clip plays while it is on screen. Each one used to loop for as long as it was
+// mounted: in the List layout every exercise of the workout has one, and five clips nobody could
+// see decoded ~28 frames a second each (headless Chrome, synthetic clips). One observer for all of
+// them pauses a clip that scrolls out of view and starts it again just before it comes back.
+// Without IntersectionObserver (old browsers, tests) the clips simply loop as before.
+let clipObserver = null
+const clipsInView = () => clipObserver || (clipObserver = new IntersectionObserver(entries => {
+  for (const e of entries) {
+    const v = e.target
+    if (e.isIntersecting) { const p = v.play?.(); if (p && typeof p.catch === 'function') p.catch(() => {}) }
+    else v.pause?.()
+  }
+}, { rootMargin: '100px 0px' }))
+export function autoplayClip(el) {
+  autoplayMuted(el)
+  if (!el || typeof IntersectionObserver === 'undefined') return
+  const io = clipsInView()
+  io.observe(el)
+  return () => io.unobserve(el)
 }
 
 // A still that will not load (offline and never cached, a lapsed session on a gated instance, a

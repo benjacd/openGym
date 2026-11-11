@@ -75,7 +75,10 @@ enum SessionCore {
         if let r = snap.restSec, r > 0 { s.restSec = r }
         if let st = snap.settings { s.settings = st }
 
-        // A session started here that the phone has not reported back yet stays, whatever it sends.
+        // A session started here that the phone has not reported back yet stays, whatever it sends,
+        // unless the phone says it discarded it: it had it after all, and dropped it.
+        let droppedThere = discarded(s.workout?.id, in: snap)
+        if droppedThere && s.workout?.id == s.startedHere { s.startedHere = nil }
         let unconfirmed = s.workout?.id != nil && s.workout?.id == s.startedHere
         guard var next = snap.active, !(next.id.map { s.finishedHere.contains($0) } ?? false) else {
             // No workout on the phone, or one the watch has finished already.
@@ -153,7 +156,7 @@ enum SessionCore {
     /// A set ticked here: the state with it done, and the event for the phone. `side` ticks one
     /// side of a per-side set; `sec` is a hold's seconds; a cardio tick carries no numbers.
     static func tick(_ s0: SessionState, entry ei: Int, set si: Int, side: String? = nil, w: Double?, r: Double?, sec: Double? = nil,
-                     at: Double, id: String, hr: [String: Double]? = nil) -> (SessionState, Event?) {
+                     at: Double, id: String, hr: [String: Double]? = nil, effort: Effort.Rating? = nil) -> (SessionState, Event?) {
         guard var workout = s0.workout, workout.entries.indices.contains(ei), workout.entries[ei].sets.indices.contains(si) else { return (s0, nil) }
         var s = s0
         let e = workout.entries[ei]
@@ -178,6 +181,8 @@ enum SessionCore {
         if let sec = sec { event["sec"] = sec }
         if let side = oneSide { event["side"] = side }
         if let hr = hr { event["hr"] = hr }
+        // "rpe": 8.5 or "rir": 2, never both; the phone puts it on the set (watch-sync.js effortFrom)
+        if let e = effort, Effort.notches(e.kind) != nil { event[e.kind] = e.value }
         return (s, event)
     }
 
@@ -222,6 +227,43 @@ enum SessionCore {
         return (count, true)
     }
 
+    /// Whether workout `wid`, gone from this snapshot, was discarded on the phone (not finished):
+    /// then nothing of it is saved to Apple Health (#776). An older phone never says: saved, as before.
+    static func discarded(_ wid: String?, in snap: Snapshot) -> Bool {
+        guard let wid = wid else { return false }
+        return snap.discarded?.contains(wid) ?? false
+    }
+
+    /// A set the phone ticked, which the watch did not: its heart rate is the watch's to work out
+    /// (the phone has no sensor), from the watch session's readings up to `at`.
+    struct PhoneTick: Equatable {
+        var exId: String
+        var entryIdx: Int
+        var setIdx: Int
+        /// When the phone ticked it (ms since 1970).
+        var at: Double
+    }
+
+    /// The sets done in `after` and not in `before`, the same workout on both sides, oldest tick
+    /// first. A set the watch ticked itself is done in `before` already (tick), so only the phone's
+    /// show up here; a set without the phone's `at` is left out (no time to measure up to).
+    /// One side of a per-side set counts too: the row's `at` is that side's tick.
+    static func phoneTicks(_ before: ActiveWorkout?, _ after: ActiveWorkout?) -> [PhoneTick] {
+        guard let b = before, let a = after, let wid = a.id, wid == b.id else { return [] }
+        var out: [PhoneTick] = []
+        for (ei, e) in a.entries.enumerated() {
+            guard b.entries.indices.contains(ei), b.entries[ei].id == e.id else { continue }
+            let old = b.entries[ei].sets
+            for (si, row) in e.sets.enumerated() {
+                guard let at = row.at, old.indices.contains(si) else { continue }
+                let was = old[si]
+                let newSide = ["L", "R"].contains { row.sides?[$0].done == true && was.sides?[$0].done != true }
+                if (row.done && !was.done) || newSide { out.append(PhoneTick(exId: e.id, entryIdx: ei, setIdx: si, at: at)) }
+            }
+        }
+        return out.sorted { $0.at < $1.at }
+    }
+
     /// Of the deleted workouts the phone names, the ones this watch has not taken out of Apple Health
     /// yet (`done`: already removed, or found to have no copy of the watch's). Only workout ids.
     static func healthToDelete(gone: [String]?, done: [String]) -> [String] {
@@ -253,7 +295,7 @@ enum SessionCore {
     /// A ready session started here, with the body weight just weighed in (or none).
     static func start(_ s0: SessionState, _ session: ReadySession, wid: String, at: Double, id: String, bw: Double? = nil) -> (SessionState, Event) {
         var s = s0
-        s.workout = ActiveWorkout(id: wid, name: session.name, unit: s.unit, cur: 0, restSec: s.restSec, rest: nil, entries: session.entries, start: at)
+        s.workout = ActiveWorkout(id: wid, name: session.name, unit: s.unit, cur: 0, restSec: s.restSec, rest: nil, entries: session.entries, start: at, healthType: session.healthType)
         s.startedHere = wid
         s.pending = [:]
         s.skipped = nil
@@ -263,8 +305,10 @@ enum SessionCore {
         return (s, event)
     }
 
-    /// The session finished here.
-    static func finish(_ s0: SessionState, at: Double, id: String) -> (SessionState, Event?) {
+    /// The session finished here, or discarded here (the phone drops it unsaved).
+    /// `idle`: ended as forgotten (Idle), not by a tap: the phone checks it against its own log
+    /// before it saves anything (frontend lib/watch-sync.js staleWatchFinish, #904).
+    static func finish(_ s0: SessionState, at: Double, id: String, discard: Bool = false, idle: Bool = false) -> (SessionState, Event?) {
         guard let w = s0.workout else { return (s0, nil) }
         var s = s0
         s.workout = nil
@@ -272,7 +316,9 @@ enum SessionCore {
         s.skipped = nil
         s.startedHere = nil
         if let wid = w.id { s.finishedHere = Array((s.finishedHere + [wid]).suffix(5)) }
-        return (s, ["id": id, "type": "finish", "wid": w.id ?? "", "at": at])
+        var event: Event = ["id": id, "type": discard ? "discard" : "finish", "wid": w.id ?? "", "at": at]
+        if idle && !discard { event["idle"] = true }
+        return (s, event)
     }
 
     /// The set to do next in an exercise: the one picked, or the first not done.
@@ -297,13 +343,15 @@ enum SessionCore {
         var prs: [String] = []
         for e in w.entries {
             let work = e.sets.filter { !$0.warmup }
+            // An exercise in a unit of its own (#657) counts in the workout's unit.
+            let f = e.factor(to: w.unit)
             for row in work {
                 if let sides = row.sides {
-                    for one in [sides.L, sides.R] where one.done { volume += (one.w ?? 0) * (one.r ?? 0) }
+                    for one in [sides.L, sides.R] where one.done { volume += (one.w ?? 0) * (one.r ?? 0) * f }
                     if row.done { sets += 1 }
                 } else if row.done {
                     sets += 1
-                    if !e.isTimed && !e.isCardio { volume += (row.w ?? 0) * (row.r ?? 0) }
+                    if !e.isTimed && !e.isCardio { volume += (row.w ?? 0) * (row.r ?? 0) * f }
                 }
             }
             if let best = e.best, beatsBest(e, work.filter { $0.done }, best) { prs.append(e.name) }
@@ -347,4 +395,149 @@ struct WorkoutSummary: Codable, Equatable {
     var calories: Double?
     /// The phone ended it (finished or discarded there) while the watch had it running.
     var endedOnPhone: Bool
+}
+
+/// After the watch turns the page by itself (a superset's partner, the next exercise, the end of a
+/// rest), taps are ignored for a second: a second Done meant for the page that just left would
+/// otherwise land on the new one and log a set nobody did. A swipe by hand unlocks it at once.
+struct TouchLock: Equatable {
+    static let seconds: TimeInterval = 1
+    private(set) var until = Date.distantPast
+
+    mutating func lock(at t: Date) { until = t.addingTimeInterval(TouchLock.seconds) }
+    mutating func unlock() { until = .distantPast }
+    func allows(at t: Date) -> Bool { t >= until }
+}
+
+/// The 3-2-1 before a workout started on the watch: the heart-rate sensor warms up meanwhile (it
+/// needs a few seconds to lock on), so the first set has its heart rate. One second a number.
+enum Countdown {
+    static let seconds = 3
+
+    /// The number up `elapsed` seconds after the countdown began: 3, 2, 1, then 0 (go).
+    static func number(at elapsed: Double) -> Int {
+        max(seconds - Int(max(elapsed, 0).rounded(.down)), 0)
+    }
+}
+
+/// A workout left running (the lifter walked out without Finish): "All done?" after 20 minutes
+/// without a logged set, ended and saved on its own after 45, at the time of its last set. Without
+/// it the Apple Health session goes on counting minutes and calories for hours. Times in ms.
+enum Idle: Equatable {
+    case active, ask, end
+
+    static let askAfter: Double = 20 * 60 * 1000
+    static let endAfter: Double = 45 * 60 * 1000
+
+    /// When the last set was logged, here or on the phone (one side of a per-side set counts), or
+    /// the phone was last used in the workout (its `activeAt`: an edit, the app opened, #904),
+    /// whichever is later; else when the workout started; nil when it says none of them.
+    static func lastSet(_ w: ActiveWorkout) -> Double? {
+        let ticks = w.entries.flatMap { $0.sets }.compactMap { $0.at }.filter { $0 > 0 }
+        let phone = w.activeAt.flatMap { $0 > 0 ? $0 : nil }
+        return [ticks.max(), phone].compactMap { $0 }.max() ?? w.start.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// What idle time counts from: the newest of the last set, when this watch picked the workout
+    /// up, the last change to it from either side (SessionStore's activityAt, the same one
+    /// SensorPlan uses) and a "keep going" answered.
+    static func since(lastSet: Double, seen: Double?, activity: Double?, snooze: Double?) -> Double {
+        [lastSet, seen ?? 0, activity ?? 0, snooze ?? 0].max() ?? lastSet
+    }
+
+    /// `since`: the last thing that counts (the last set, or a "keep going" answered since).
+    static func state(since: Double, now: Double) -> Idle {
+        let idle = now - since
+        return idle >= endAfter ? .end : idle >= askAfter ? .ask : .active
+    }
+
+    /// What the phone answers when the watch asks before ending a workout as forgotten: the workout
+    /// it runs and when it was last used in it (its newest snapshot, read by the phone app's native
+    /// side, so the answer comes even while the page sleeps).
+    struct PhoneReply: Equatable {
+        var wid: String?
+        var activeAt: Double?
+    }
+
+    /// The watch's copy can be stale: in #904 no snapshot had reached it for 45 minutes while sets
+    /// were ticked on the phone, and it ended that workout. So `.end` is only the watch's to call
+    /// once the phone has had its say:
+    ///   no answer (out of reach, no reply)       ask, never end: the lifter decides
+    ///   the phone runs another workout, or none  end: nothing of this one goes on there
+    ///   the phone used it since                  counted from then, like a set logged here
+    static func verdict(since: Double, now: Double, wid: String?, reply: PhoneReply?) -> Idle {
+        let alone = state(since: since, now: now)
+        guard alone == .end else { return alone }
+        guard let r = reply else { return .ask }
+        guard r.wid != nil, r.wid == wid else { return .end }
+        return state(since: max(since, r.activeAt ?? 0), now: now)
+    }
+}
+
+/*
+ * RPE or RIR on a set, in the scale the phone's profile logs (lib/history.js EFFORT). Empty by
+ * default: a set nobody rated sends no effort. The crown walks notches from "not rated" through
+ * the scale from easy to hard, so turning up always means harder, whichever the scale:
+ *   RPE   –, 6, 6.5, … 10      (half points, as on the phone)
+ *   RIR   –, 5, 4, 3, 2, 1, 0  (whole reps left; 0 = failure, the far end of the crown)
+ */
+enum Effort {
+    struct Rating: Equatable {
+        var kind: String
+        var value: Double
+    }
+
+    /// The scale's values from easy to hard, nil for a scale the watch does not know.
+    static func notches(_ kind: String?) -> [Double]? {
+        switch kind {
+        case "rpe": return stride(from: 6.0, through: 10.0, by: 0.5).map { $0 }
+        case "rir": return [5, 4, 3, 2, 1, 0]
+        default: return nil
+        }
+    }
+
+    /// "RPE" / "RIR": the phone's own column heading, the same word in every language.
+    static func name(_ kind: String) -> String { kind == "rpe" ? "RPE" : "RIR" }
+
+    /// The value at a crown position: 0 is not rated, 1… the scale; past either end it stops there.
+    static func value(_ kind: String, at position: Int) -> Double? {
+        guard let n = notches(kind), position > 0 else { return nil }
+        return n[min(position, n.count) - 1]
+    }
+
+    /// Where a value sits on the crown (the nearest notch); 0 for not rated.
+    static func position(_ kind: String, of value: Double?) -> Int {
+        guard let n = notches(kind), let v = value else { return 0 }
+        var best = 0
+        for i in n.indices where abs(n[i] - v) < abs(n[best] - v) { best = i }
+        return best + 1
+    }
+
+    /// Where the editor opens on a set not rated yet: a hard working set, RPE 8 / RIR 2.
+    static func start(_ kind: String) -> Double { kind == "rpe" ? 8 : 2 }
+
+    /// The phone's colour band (lib/effort.js EFFORT_BANDS), by RIR: 0 nothing left … 5 easy.
+    static func band(_ kind: String, _ value: Double) -> Int {
+        let rir = kind == "rpe" ? 10 - value : value
+        let tops: [Double] = [0.25, 0.75, 1.5, 2.5, 3.5]
+        return tops.firstIndex { rir <= $0 } ?? tops.count
+    }
+}
+
+/*
+ * The weigh-in's crown, in two parts: the whole kilos (or pounds) and the tenth after the point.
+ * One crown in tenths moved a whole kilo in a flick and was fiddly to stop on the right one.
+ */
+enum WeighIn {
+    /// 79.4 → (79, 4). Rounded to the tenth first, so 79.95 is (80, 0), never (79, 10).
+    static func parts(_ v: Double) -> (whole: Double, tenth: Double) {
+        let tenths = (max(0, v) * 10).rounded()
+        return ((tenths / 10).rounded(.down), tenths.truncatingRemainder(dividingBy: 10))
+    }
+
+    /// (79, 4) → 79.4, on the tenth's grid (no 79.40000001 to send to the phone).
+    static func join(whole: Double, tenth: Double) -> Double {
+        let t = min(9, max(0, tenth.rounded()))
+        return (whole.rounded() * 10 + t) / 10
+    }
 }

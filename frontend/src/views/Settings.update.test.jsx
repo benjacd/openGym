@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => {
   })
   state.checkForUpdate = vi.fn(() => Promise.resolve({ hasUpdate: true, latestVersion: '9.9.9', apkUrl: 'https://x/opengym.apk', hashUrl: null }))
   state.confirmSheet = vi.fn()
+  state.forget = vi.fn()
   return state
 })
 vi.mock('../store/useStore.js', () => {
@@ -53,8 +54,9 @@ vi.mock('../lib/mobile.js', () => ({
 vi.mock('../lib/update.js', () => ({
   checkForUpdate: (...a) => mocks.checkForUpdate(...a),
   downloadAndInstall: vi.fn(),
+  forgetDownloadedUpdate: (...a) => mocks.forget(...a),
 }))
-vi.mock('../lib/channel.js', () => ({ selfUpdates: () => Promise.resolve(mocks.channel === 'sideload') }))
+vi.mock('../lib/channel.js', () => ({ getChannel: () => Promise.resolve(mocks.channel), gymReminderBuilt: () => Promise.resolve(true) }))
 vi.mock('./MobileOnboarding.jsx', () => ({ ConnectSheet: () => null }))
 vi.mock('../sheets.jsx', () => ({
   starterPlanSheet: vi.fn(), confirmSheet: (...a) => mocks.confirmSheet(...a), importFromApp: vi.fn(),
@@ -74,6 +76,7 @@ beforeEach(() => {
   mocks.channel = 'sideload'
   mocks.checkForUpdate.mockClear()
   mocks.confirmSheet.mockClear()
+  mocks.forget.mockClear()
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -152,5 +155,72 @@ describe('Settings — in-app update check', () => {
     await mount()
     expect(updateRow()).toBeUndefined()
     expect(checkRow()).toBeTruthy()
+  })
+
+  it('Android: a downloaded APK left in the cache is deleted once nothing newer is out, and kept while one is', async () => {
+    mocks.MOBILE = true
+    mocks.android = true
+    await mount()
+    expect(mocks.forget).not.toHaveBeenCalled()   // 9.9.9 is waiting: its APK may be the one in the cache
+    act(() => root.unmount())
+    root = createRoot(host)
+    mocks.checkForUpdate.mockResolvedValueOnce({ hasUpdate: false, latestVersion: 'test', apkUrl: null, hashUrl: null })
+    await mount()
+    expect(mocks.forget).toHaveBeenCalledTimes(1)
+  })
+})
+
+const versionRow = () => [...host.querySelectorAll('.lrow')].find(r => r.textContent.includes('Version'))
+describe('Settings → About: which APK this is', () => {
+  it('the sideloaded APK names its kind and the animation size built in', async () => {
+    mocks.MOBILE = true
+    mocks.android = true
+    await mount()
+    expect(versionRow().textContent).toContain('Standard APK, animations at 180 px')
+  })
+
+  it('not on the web, iOS or the Google Play build', async () => {
+    await mount()
+    expect(versionRow().textContent).not.toContain('APK,')
+    for (const [android, channel] of [[false, 'sideload'], [true, 'play']]) {
+      act(() => root.unmount())
+      root = createRoot(host)
+      mocks.MOBILE = true
+      mocks.android = android
+      mocks.channel = channel
+      await mount()
+      expect(versionRow().textContent).not.toContain('APK,')
+    }
+  })
+})
+
+// Google Play's payments policy: no links to pay outside Play billing for anything but a
+// registered charity, so the Play build has no coffee links, only its own rating row.
+describe('Settings: support links', () => {
+  const row = text => [...host.querySelectorAll('.lrow')].find(r => r.textContent.includes(text))
+  it('the APK keeps the donation links and has no Play rating row', async () => {
+    mocks.MOBILE = true
+    mocks.android = true
+    await mount()
+    expect(row('Buy me a coffee')).toBeTruthy()
+    expect(row('Ko-fi')).toBeTruthy()
+    expect(row('GitHub Sponsors')).toBeTruthy()
+    expect(row('Rate openGym on Google Play')).toBeUndefined()
+  })
+  it('the Google Play build shows only the rating row', async () => {
+    mocks.MOBILE = true
+    mocks.android = true
+    mocks.channel = 'play'
+    await mount()
+    expect(row('Buy me a coffee')).toBeUndefined()
+    expect(row('Ko-fi')).toBeUndefined()
+    expect(row('GitHub Sponsors')).toBeUndefined()
+    expect(row('Rate openGym on Google Play')).toBeTruthy()
+    expect(host.textContent).not.toContain('A coffee keeps it that way')
+  })
+  it('the web keeps the donation links', async () => {
+    await mount()
+    expect(row('Buy me a coffee')).toBeTruthy()
+    expect(row('Rate openGym on Google Play')).toBeUndefined()
   })
 })

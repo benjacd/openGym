@@ -14,23 +14,34 @@
 // a tap in the app runs (rest timer, the high-water mark, the end-of-workout sheet), never a second
 // copy of it. Each event is applied once, by its id, and only then acknowledged, which takes it out
 // of the native queue; until the workout screen is there to apply it, it waits there.
+// Next to Done sits one smaller button: Skip rest while a rest runs ({ type: 'restSkip', wid, at }),
+// otherwise Next exercise ({ type: 'next', wid, fromEntryIdx, at }), which moves on to the next
+// exercise without ticking anything (Discord: Done read like "finish", and there was no way to
+// leave a machine somebody else took). The native side moves the activity on by itself for both.
 //
 // Text only: no exercise animations or pictures (Gym visual licence). iPhone app only.
 import { MOBILE, nativePlatform } from './mobile.js'
 import { EXIDX } from './exercises.js'
-import { exerciseNameFor, t } from './i18n.js'
+import { t } from './i18n.js'
+import { exerciseNameText } from './format.js'
 import { setLabel, supersetUnits } from './history.js'
+import { viewRow, exUnitTag } from './ex-unit.js'
 import { isWarmupRow } from './workout-model.js'
-import { restSecFor } from './supersetFlow.js'
+import { nextUnfinishedUnit, restSecFor } from './supersetFlow.js'
 import { speedUnitOf } from './speed.js'
 import { accentPair, accentValue } from './accent.js'
 
-export const LIVE_VERSION = 1
+export const LIVE_VERSION = 2
 const APPLIED_KEY = 'gym_live_applied'
 const APPLIED_MAX = 300
 const SEND_DEBOUNCE_MS = 300
 // The sets after the current one the activity carries, so its Done can move on without the page.
 export const LIVE_AHEAD = 8
+// The first open set of this many later exercises, so Next exercise works without the page too.
+export const LIVE_UNITS = 4
+// ActivityKit drops an update over 4 KB. Long names in a script with 3-byte letters can get there,
+// so the farthest sets go first until it fits (the page sends a fresh list after every tick anyway).
+const LIVE_BUDGET = 3600
 
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
@@ -55,13 +66,13 @@ export function upcomingSets (S) {
     try { rest = restSecFor(A.entries, unit, num(S.restSec) || 0) || 0 } catch { rest = num(S.restSec) || 0 }
     for (let r = 0; r < rounds; r++) {
       const inRound = unit.filter(i => { const s = A.entries[i]?.sets?.[r]; return s && !s.done })
-      inRound.forEach((i, k) => out.push({ entryIdx: i, setIdx: r, restAfter: k === inRound.length - 1 ? rest : 0 }))
+      inRound.forEach((i, k) => out.push({ entryIdx: i, setIdx: r, restAfter: k === inRound.length - 1 ? rest : 0, unit: unit[0] }))
     }
   }
   return out
 }
 
-function setView (S, A, { entryIdx, setIdx, restAfter }) {
+function setView (S, A, { entryIdx, setIdx, restAfter, unit }) {
   const e = A.entries[entryIdx]
   const s = e.sets[setIdx]
   const target = e.target || {}
@@ -69,31 +80,62 @@ function setView (S, A, { entryIdx, setIdx, restAfter }) {
   const warmup = !!isWarmupRow(s)
   const n = warmup ? (e.sets || []).filter(isWarmupRow).indexOf(s) + 1 : work.indexOf(s) + 1
   let label = ''
-  try { label = setLabel(e.id, s, target, speedUnitOf(S)) } catch { label = '' }
+  // An exercise in a weight unit of its own (#657) reads in it, and says which.
+  try { label = setLabel(e.id, viewRow(S, e.id, s), target, speedUnitOf(S)) + exUnitTag(S, e.id) } catch { label = '' }
   return {
     exId: String(e.id),
     entryIdx,
     setIdx,
-    exName: EXIDX[e.id] ? exerciseNameFor(EXIDX[e.id]) : String(target.name || e.name || e.id),
+    // Cased as the workout screen shows it: the stored names are lower-case and only CSS title-cases
+    // them in the app, which the Lock Screen never sees (Discord).
+    exName: EXIDX[e.id] ? exerciseNameText(EXIDX[e.id]) : String(target.name || e.name || e.id),
     setLine: warmup ? t('Warm-up') + ' ' + n : t('Set {0} of {1}', n, work.length),
     target: label,
     restAfter: Math.max(0, Math.round(restAfter || 0)),
+    // The superset unit's first entry: Next exercise moves on to the next set with another one.
+    unit: Number.isInteger(unit) ? unit : entryIdx,
   }
+}
+
+const bytes = o => new TextEncoder().encode(JSON.stringify(o)).length
+
+/** Trims the farthest sets, then the farthest exercises, until the activity fits ActivityKit's 4 KB. */
+function fitLive (live) {
+  const st = live.state
+  while (bytes(live) > LIVE_BUDGET && (st.ahead.length || st.unitStarts.length)) {
+    if (st.ahead.length > st.unitStarts.length) st.ahead.pop()
+    else st.unitStarts.pop()
+  }
+  return live
 }
 
 /**
  * The activity's fixed part (`attributes`: what stays the same for the workout) and its state, or
- * null when no workout is running here. `timer` is the rest as useUI holds it.
+ * null when no workout is running here. `timer` is the rest as useUI holds it; `hold` the hold
+ * (`work`) and the count-in before one that starts by itself (`countIn`), also from useUI.
  */
-export function buildLiveActivity (S, timer = null) {
+export function buildLiveActivity (S, timer = null, hold = {}) {
   const A = S && S.active
   if (!A || !Array.isArray(A.entries) || !A.entries.length || A.editingWorkoutId) return null
   const next = upcomingSets(S)
   let done = 0, total = 0
   for (const e of A.entries) for (const s of e?.sets || []) { total++; if (s?.done) done++ }
   const rest = timer && !timer.ready && timer.kind !== 'switch' ? timer : null
+  // A hold counting down, or the 3-2-1 before one (lib/auto-holds.js): the Lock Screen counts it
+  // down like the rest, under its own word, and offers Stop auto beside Log set while a chain runs.
+  const ci = hold && hold.countIn
+  const wk = !ci && hold && hold.work ? hold.work : null
+  const clock = ci || wk
+  const auto = !!(ci || (wk && wk.auto) || (timer && !timer.ready && hold && hold.autoNext))
   const pair = accentPair(accentValue(S))
-  return {
+  // The first open set of each exercise after the current one, in the order the sets come.
+  const starts = []
+  for (const x of next) {
+    if (x.unit === next[0].unit || starts.some(y => y.unit === x.unit)) continue
+    if (starts.length >= LIVE_UNITS) break
+    starts.push(x)
+  }
+  return fitLive({
     attributes: {
       v: LIVE_VERSION,
       wid: String(A.id || ''),
@@ -101,31 +143,68 @@ export function buildLiveActivity (S, timer = null) {
       accent: pair.accent,
       ink: pair.ink,
       labels: {
-        done: t('Done'),
+        // "Log set", not "Done": it ticks the set, and "Done" read like finishing the workout.
+        done: t('Log set'),
         rest: t('Rest'),
         next: t('Up next'),
         allDone: t('All sets done'),
         restOver: t('Rest’s over. Next set!'),
+        nextExercise: t('Next exercise'),
+        skipRest: t('Skip rest'),
+        // Sets are left, but the activity ran past the ones it carries (many taps, page asleep).
+        openApp: t('Open openGym for the next set'),
+        hold: t('Hold'),
+        getReady: t('Get ready'),
+        stopAuto: t('Stop auto'),
       },
     },
     state: {
       name: A.name || '',
       cur: next.length ? setView(S, A, next[0]) : null,
       ahead: next.slice(1, 1 + LIVE_AHEAD).map(x => setView(S, A, x)),
+      unitStarts: starts.map(x => setView(S, A, x)),
       restEndsAt: rest && !rest.paused ? num(rest.endsAt) : null,
       restLeft: rest && rest.paused ? num(rest.left) : null,
       restTotal: rest ? num(rest.total) : null,
+      holdEndsAt: clock && !clock.paused ? num(clock.endsAt) : null,
+      holdLeft: clock && clock.paused ? num(clock.left) : null,
+      holdTotal: clock ? num(clock.total) : null,
+      holdKind: ci ? 'countin' : wk ? 'hold' : null,
+      auto,
       done,
       total,
     },
-  }
+  })
 }
 
 /* ---------- applying the activity's events ---------- */
 
-let handlers = null   // the workout screen's: setDone
+let handlers = null   // the workout screen's: setDone, next, restSkip, timer
 const readApplied = () => { try { return JSON.parse(localStorage.getItem(APPLIED_KEY)) || [] } catch { return [] } }
 const writeApplied = ids => { try { localStorage.setItem(APPLIED_KEY, JSON.stringify(ids.slice(-APPLIED_MAX))) } catch { /* the queue's ack is what counts */ } }
+
+/**
+ * Where Next exercise from `fromEntryIdx` goes: the first entry of the next unit with sets open, as
+ * the workout screen's own Next would. null when the page already moved off that unit (an event
+ * applied twice, or a tick that advanced by itself) or nothing else is open.
+ */
+export function nextExerciseTarget (A, fromEntryIdx) {
+  if (!A || !Array.isArray(A.entries) || !Number.isInteger(fromEntryIdx)) return null
+  const units = supersetUnits(A.entries)
+  const from = units.find(u => u.includes(fromEntryIdx))
+  if (!from || !from.includes(A.cur || 0)) return null
+  const to = nextUnfinishedUnit(A.entries, units, fromEntryIdx)
+  return to && to !== from ? to[0] : null
+}
+
+/** Whether Skip rest tapped at `at` is about this rest: one started after the tap is a new one. */
+export function restSkipApplies (timer, at) {
+  if (!timer || timer.kind === 'switch') return false
+  if (timer.paused || timer.ready || !num(at)) return true
+  const started = num(timer.endsAt) != null && num(timer.total) != null ? timer.endsAt - timer.total * 1000 : null
+  // A second of slack: the page restarts a rest it hears of late from the tap's own time.
+  return started == null || started <= at + 1000
+}
 
 function entryIndexOf (A, ev) {
   if (A.entries[ev.entryIdx] && String(A.entries[ev.entryIdx].id) === String(ev.exId)) return ev.entryIdx
@@ -151,6 +230,16 @@ export function applyLiveEvents (events, getState) {
       const idx = entryIndexOf(A, ev)
       const set = idx >= 0 ? A.entries[idx].sets?.[ev.setIdx] : null
       if (set && !set.done) handlers.setDone(idx, ev.setIdx, { at: num(ev.at) })
+    } else if (ev.type === 'next' && ours) {
+      if (!handlers) break
+      const to = nextExerciseTarget(A, ev.fromEntryIdx)
+      if (to != null) handlers.next?.(to)
+    } else if (ev.type === 'autoStop' && ours) {
+      if (!handlers) break
+      handlers.autoStop?.()
+    } else if (ev.type === 'restSkip' && ours) {
+      if (!handlers) break
+      if (restSkipApplies(handlers.timer?.(), num(ev.at))) handlers.restSkip?.()
     }
     // Applied, or meaningless now (another workout, a set that is gone or already ticked).
     applied.push(ev.id)
@@ -196,7 +285,7 @@ export function drainLiveEvents () {
   return draining
 }
 
-/** The workout screen hands over its own tick while it is mounted. Returns the unbind. */
+/** The workout screen hands over its own tick (and Next, Skip rest) while it is mounted. Returns the unbind. */
 export function bindLiveActions (h) {
   handlers = h
   drainLiveEvents()
@@ -217,10 +306,12 @@ export async function startLiveActivitySync ({ useStore, useUI }) {
   let last = null, tm = null
   const send = async () => {
     tm = null
+    if (useStore.getState().tourSandbox) return
     // An empty, not yet restored copy would end the activity of a workout that is still running.
     if (!storeReady()) return
     try {
-      const live = buildLiveActivity(useStore.getState().S, useUI.getState().timer)
+      const ui = useUI.getState()
+      const live = buildLiveActivity(useStore.getState().S, ui.timer, { work: ui.work, countIn: ui.countIn, autoNext: !!ui.timer?.autoNext })
       const json = live ? JSON.stringify(live) : ''
       if (json === last) return
       if (live) await p.LiveActivity.update({ wid: live.attributes.wid, attributes: JSON.stringify(live.attributes), state: JSON.stringify(live.state) })
@@ -228,13 +319,17 @@ export async function startLiveActivitySync ({ useStore, useUI }) {
       last = json
     } catch { /* not now: the next change tries again */ }
   }
-  const schedule = () => { if (!supported) return; clearTimeout(tm); tm = setTimeout(send, SEND_DEBOUNCE_MS) }
+  // Nor to the Lock Screen: the tour's practice workout (useStore enterTourSandbox) is not a session.
+  const schedule = () => { if (!supported || useStore.getState().tourSandbox) return; clearTimeout(tm); tm = setTimeout(send, SEND_DEBOUNCE_MS) }
   const offStore = useStore.subscribe((s, prev) => {
     if (s.ready && !prev.ready) { drainLiveEvents(); schedule() }
     else if (s.S !== prev.S) schedule()
   })
   const restOf = x => (x ? `${x.endsAt}|${!!x.paused}|${!!x.ready}|${x.left}|${x.kind || ''}` : '')
+  const holdOf = x => (x ? `${x.endsAt}|${!!x.paused}|${!!x.auto}` : '')
   const offUI = useUI.subscribe((s, prev) => {
+    // A hold or a count-in starting, pausing or ending (not its every second).
+    if (holdOf(s.work) !== holdOf(prev.work) || holdOf(s.countIn) !== holdOf(prev.countIn)) { schedule(); return }
     if (s.timer === prev.timer) return
     // A running rest changes `left` every second; only a start, a stop or a pause matters here.
     const a = s.timer, b = prev.timer

@@ -16,6 +16,9 @@ struct Snapshot: Codable, Equatable {
     /// Apple Health sync ids of workouts deleted in openGym ("opengym-w-<id>", newest first): the
     /// watch takes out the copies it saved itself, which the phone may not delete.
     var healthGone: [String]?
+    /// Workouts discarded on the phone lately (their ids): one of these that leaves the snapshot
+    /// was not finished, so the watch drops its Apple Health workout instead of saving it (#776).
+    var discarded: [String]?
 }
 
 /// What the watch can start by itself: today's planned session and a few other routines.
@@ -28,6 +31,8 @@ struct ReadySession: Codable, Equatable {
     var routineIds: [String]
     var name: String
     var entries: [Entry]
+    /// Apple Health's workout type for it (lib/health-connect.js plannedType, #799); none from an older phone.
+    var healthType: String?
 }
 
 struct ActiveWorkout: Codable, Equatable {
@@ -40,6 +45,11 @@ struct ActiveWorkout: Codable, Equatable {
     var entries: [Entry]
     /// When it started (ms since 1970), for the summary's duration.
     var start: Double?
+    /// Apple Health's workout type for it (#799); none: strength training, as before.
+    var healthType: String?
+    /// When it was last worked on on the phone (ms): a set ticked, an edit, the app opened with it
+    /// (#904). The forgotten-workout check counts from it as from a set logged here.
+    var activeAt: Double? = nil
 }
 
 struct RestInfo: Codable, Equatable {
@@ -66,10 +76,21 @@ struct Entry: Codable, Equatable {
     var assisted: Bool?
     /// The weight step this exercise moves in on the phone (its plates or machine stack).
     var step: Double?
+    /// Its own weight unit, "kg" or "lb", when it is not the workout's (#657): its weights, last
+    /// time, best and step are in it, and so is what the watch sends back. None: the workout's.
+    var unit: String?
 
     var isTimed: Bool { mode == "time" }
     var isCardio: Bool { mode == "cardio" }
     var isBodyweight: Bool { bodyweight == true }
+    /// The unit this exercise's weights are shown and typed in.
+    func weightUnit(_ workoutUnit: String) -> String { unit ?? workoutUnit }
+    /// What one of its kilos or pounds is in `workoutUnit`, for a total that mixes exercises.
+    func factor(to workoutUnit: String) -> Double {
+        let own = weightUnit(workoutUnit)
+        if own == workoutUnit { return 1 }
+        return own == "lb" ? 0.45359237 : 1 / 0.45359237
+    }
 }
 
 struct BestSet: Codable, Equatable {
@@ -131,6 +152,10 @@ struct WatchSettings: Codable, Equatable {
     var lastBw: Double?
     /// What the watch shows during a workout (Settings → Apple Watch); nil is the default.
     var show: WatchShow?
+    /// The effort the profile logs per set, "rpe" or "rir"; nil: none (no effort tile).
+    var effort: String?
+    /// Timed holds start by themselves (the phone's Settings → Workout): rest over, 3-2-1, hold.
+    var autoHolds: Bool?
 }
 
 /// What a workout screen shows. Each nil means its default.
